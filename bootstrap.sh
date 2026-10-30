@@ -12,7 +12,7 @@ CONFIG_FILE="${SECRETS_DIR}/server-infra.env"
 ENV_LINK="./.env"
 
 exec > >(tee -a "${LOG_FILE}") 2>&1
-echo "=== Bootstrap v2 started at $(date -Is) ==="
+echo "=== Bootstrap v5 started at $(date -Is) ==="
 
 # ---------- helpers ----------
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
@@ -273,7 +273,7 @@ fi
 
 systemctl enable --now wg-quick@wg0 || warn "Не удалось включить wg-quick@wg0 (проверьте конфиг)."
 
-echo "=== Bootstrap v2 completed at $(date -Is) ==="
+echo "=== Bootstrap v5 completed at $(date -Is) ==="
 echo "Конфигурация: ${CONFIG_FILE}"
 echo "Симлинк: ${ENV_LINK}"
 echo "Лог: ${LOG_FILE}"
