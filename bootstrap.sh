@@ -53,7 +53,7 @@ ask() {
     die "Значение для ${var_name} не может быть пустым."
   fi
   printf -v "${var_name}" '%s' "${input}"
-  export "${var_name}"
+  export "${var_name?}"
 }
 
 # $3 = "optional" → пустое значение разрешено (для WG_PRIVATE_KEY)
@@ -73,7 +73,7 @@ ask_secret() {
     die "Значение для ${var_name} обязательно."
   fi
   printf -v "${var_name}" '%s' "${input}"
-  export "${var_name}"
+  export "${var_name?}"
 }
 
 # upsert в env-файл (идемпотентно)
@@ -221,7 +221,7 @@ else
   fi
   echo \
     "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-    $(. /etc/os-release && echo "${VERSION_CODENAME}") stable" \
+    ${OS_CODENAME} stable" \
     > /etc/apt/sources.list.d/docker.list
   apt-get update -y
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
