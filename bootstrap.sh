@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# server-infra bootstrap (Ubuntu 24.04, first run as root)
+# server-infra bootstrap v2 (Ubuntu 24.04, first run as root)
 # Идемпотентный скрипт: можно перезапускать.
 # ============================================================
 
@@ -12,7 +12,7 @@ CONFIG_FILE="${SECRETS_DIR}/server-infra.env"
 ENV_LINK="./.env"
 
 exec > >(tee -a "${LOG_FILE}") 2>&1
-echo "=== Bootstrap started at $(date -Is) ==="
+echo "=== Bootstrap v2 started at $(date -Is) ==="
 
 # ---------- helpers ----------
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
@@ -25,6 +25,13 @@ require_root() {
   fi
 }
 
+# отказываемся работать с CRLF-файлом
+check_line_endings() {
+  if head -1 "$0" | grep -q $'\r'; then
+    die "В файле скрипта CRLF-переводы строк. Выполните: sed -i 's/\\r$//' $0"
+  fi
+}
+
 # читает переменную из уже существующего env-файла (если есть)
 load_prev() {
   local key="$1"
@@ -34,34 +41,37 @@ load_prev() {
 }
 
 # запрашивает значение с учётом предыдущего и дефолта
+# $4 = "optional" → пустое значение разрешено
 ask() {
-  local var_name="$1" prompt="$2" default="${3:-}" prev
+  local var_name="$1" prompt="$2" default="${3:-}" mode="${4:-required}" prev
   prev="$(load_prev "${var_name}")"
   local effective_default="${prev:-${default}}"
   local input
   read -r -p "${prompt} [${effective_default}]: " input || true
   input="${input:-${effective_default}}"
-  # простая валидация: не пусто
-  if [[ -z "${input}" ]]; then
+  if [[ "${mode}" == "required" && -z "${input}" ]]; then
     die "Значение для ${var_name} не может быть пустым."
   fi
   printf -v "${var_name}" '%s' "${input}"
   export "${var_name}"
 }
 
+# $3 = "optional" → пустое значение разрешено (для WG_PRIVATE_KEY)
 ask_secret() {
-  local var_name="$1" prompt="$2"
+  local var_name="$1" prompt="$2" mode="${3:-required}"
   local prev input
   prev="$(load_prev "${var_name}")"
   if [[ -n "${prev}" ]]; then
-    read -r -s -p "${prompt} [оставьте пустым, чтобы использовать сохранённый]: " input || true
+    read -r -s -p "${prompt} [Enter = использовать сохранённый]: " input || true
     echo
     input="${input:-${prev}}"
   else
     read -r -s -p "${prompt}: " input || true
     echo
   fi
-  [[ -n "${input}" ]] || die "Секретное значение для ${var_name} обязательно."
+  if [[ "${mode}" == "required" && -z "${input}" ]]; then
+    die "Значение для ${var_name} обязательно."
+  fi
   printf -v "${var_name}" '%s' "${input}"
   export "${var_name}"
 }
@@ -79,12 +89,16 @@ write_env() {
   log "Сохранено ${key}=***"
 }
 
-# ---------- 0. root & prerequisites ----------
+is_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+# ---------- 0. checks ----------
 require_root
+check_line_endings
+command -v curl >/dev/null 2>&1 || die "Не найден curl. Установите: apt-get install -y curl"
+
 mkdir -p "${SECRETS_DIR}"
 chmod 700 "${SECRETS_DIR}"
 
-# Если конфиг уже есть — предлагаем использовать его или перезаписать
 if [[ -f "${CONFIG_FILE}" ]]; then
   echo "Обнаружен существующий конфиг: ${CONFIG_FILE}"
   read -r -p "Использовать сохранённые значения? [Y/n]: " reuse
@@ -102,11 +116,13 @@ fi
 # ---------- 1. сбор переменных ----------
 log "Шаг 1/5: Сбор переменных."
 
-ask ADMIN_USER "Имя административного пользователя (будет создан/использован)" "anton"
-ask SSH_PORT "Порт SSH" "22"
-ask WG_PORT "UDP-порт WireGuard" "51820"
+ask ADMIN_USER "Имя административного пользователя" "anton"
+ask SSH_PORT   "Порт SSH" "22"
+is_number "${SSH_PORT}" || die "SSH_PORT должен быть числом."
+ask WG_PORT    "UDP-порт WireGuard" "51820"
+is_number "${WG_PORT}" || die "WG_PORT должен быть числом."
 ask WG_NETWORK "Подсеть WireGuard (CIDR)" "10.8.0.0/24"
-ask SERVER_IP "Публичный IP сервера (оставьте пустым для автоопределения)" ""
+ask SERVER_IP  "Публичный IP сервера (пусто = автоопределение)" "" "optional"
 
 if [[ -z "${SERVER_IP}" ]]; then
   SERVER_IP="$(curl -4 -fsS https://ifconfig.me 2>/dev/null || true)"
@@ -114,19 +130,17 @@ if [[ -z "${SERVER_IP}" ]]; then
   log "Автоопределён SERVER_IP=${SERVER_IP}"
 fi
 
-ask_secret WG_PRIVATE_KEY "Приватный ключ WireGuard (оставьте пустым для генерации нового)" || true
-# если ключа нет — сгенерируем позже; пока просто запомним, что его нет
+# WG_PRIVATE_KEY — необязательный: пусто = сгенерировать позже
+ask_secret WG_PRIVATE_KEY "Приватный ключ WireGuard (пусто = сгенерировать)" optional
 
 # ---------- 2. сохранение конфига ----------
 log "Шаг 2/5: Сохранение конфигурации."
-write_env ADMIN_USER      "${ADMIN_USER}"
-write_env SSH_PORT        "${SSH_PORT}"
-write_env WG_PORT         "${WG_PORT}"
-write_env WG_NETWORK      "${WG_NETWORK}"
-write_env SERVER_IP       "${SERVER_IP}"
-# приватный ключ сохраним после генерации (шаг 4)
+write_env ADMIN_USER "${ADMIN_USER}"
+write_env SSH_PORT   "${SSH_PORT}"
+write_env WG_PORT    "${WG_PORT}"
+write_env WG_NETWORK "${WG_NETWORK}"
+write_env SERVER_IP  "${SERVER_IP}"
 
-# симлинк .env в корне репозитория
 if [[ -L "${ENV_LINK}" || -f "${ENV_LINK}" ]]; then
   log "${ENV_LINK} уже существует — оставляем как есть."
 else
@@ -134,7 +148,7 @@ else
   log "Создан симлинк ${ENV_LINK} -> ${CONFIG_FILE}"
 fi
 
-# ---------- 3. базовый hardening ----------
+# ---------- 3. SSH hardening (пароль для ADMIN_USER, root по SSH запрещён) ----------
 log "Шаг 3/5: Базовый hardening (обновления, UFW, fail2ban, SSH)."
 
 export DEBIAN_FRONTEND=noninteractive
@@ -142,37 +156,56 @@ apt-get update -y
 apt-get upgrade -y
 
 # UFW
-if ! command -v ufw >/dev/null 2>&1; then
-  apt-get install -y ufw
-fi
+command -v ufw >/dev/null 2>&1 || apt-get install -y ufw
 ufw --force default deny incoming
 ufw --force default allow outgoing
 ufw allow "${SSH_PORT}/tcp" comment 'SSH'
 ufw allow "${WG_PORT}/udp" comment 'WireGuard'
 ufw --force enable
-log "UFW настроен: deny incoming, allow ${SSH_PORT}/tcp, ${WG_PORT}/udp."
+log "UFW: deny incoming, allow ${SSH_PORT}/tcp и ${WG_PORT}/udp."
 
 # fail2ban
-if ! dpkg -s fail2ban >/dev/null 2>&1; then
-  apt-get install -y fail2ban
-fi
+dpkg -s fail2ban >/dev/null 2>&1 || apt-get install -y fail2ban
 systemctl enable --now fail2ban
 log "fail2ban установлен и запущен."
 
-# SSH hardening (осторожно: не блокируем текущую сессию)
+# Пользователь-администратор (создаётся, если его нет)
+if id "${ADMIN_USER}" >/dev/null 2>&1; then
+  log "Пользователь ${ADMIN_USER} уже существует."
+else
+  useradd -m -s /bin/bash -G sudo "${ADMIN_USER}"
+  log "Создан ${ADMIN_USER} (в группе sudo)."
+fi
+
+# sudo без пароля НЕ настраиваем — пусть спрашивает (безопаснее)
+# но гарантируем, что anton в sudo
+if ! id -nG "${ADMIN_USER}" | tr ' ' '\n' | grep -qx sudo; then
+  usermod -aG sudo "${ADMIN_USER}"
+  log "Добавлен ${ADMIN_USER} в группу sudo."
+fi
+
+# Проверяем, что пароль установлен (это единственный способ входа)
+if passwd -S "${ADMIN_USER}" | awk '{print $2}' | grep -qE '^(L|NP)$'; then
+  warn "У ${ADMIN_USER} нет действующего пароля (заблокирован или не задан)."
+  warn "Задайте сейчас: passwd ${ADMIN_USER}"
+  warn "После этого перезапустите bootstrap или просто закройте/откройте сессию."
+fi
+
+# SSH hardening: пароль для anton, root по SSH запрещён
 SSHD_CONFIG="/etc/ssh/sshd_config.d/99-server-infra.conf"
 cat > "${SSHD_CONFIG}" <<EOF
 Port ${SSH_PORT}
 PermitRootLogin no
-PasswordAuthentication no
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 EOF
-# проверим синтаксис перед рестартом
+
 if sshd -t; then
   systemctl reload ssh
-  log "SSH hardening применён (порт ${SSH_PORT}, root login запрещён)."
+  log "SSH: порт ${SSH_PORT}, PermitRootLogin=no, PasswordAuthentication=yes."
 else
-  warn "sshd -t не прошёл. Файл ${SSHD_CONFIG} создан, но рестарт не выполнен."
+  warn "sshd -t не прошёл. Файл ${SSHD_CONFIG} создан, рестарт НЕ выполнен."
 fi
 
 # ---------- 4. Docker ----------
@@ -198,9 +231,7 @@ fi
 
 # ---------- 5. WireGuard ----------
 log "Шаг 5/5: Установка и настройка WireGuard."
-if ! dpkg -s wireguard >/dev/null 2>&1; then
-  apt-get install -y wireguard
-fi
+dpkg -s wireguard >/dev/null 2>&1 || apt-get install -y wireguard
 
 WG_DIR="/etc/wireguard"
 mkdir -p "${WG_DIR}"
@@ -210,7 +241,6 @@ WG_PRIV_FILE="${WG_DIR}/privatekey"
 WG_PUB_FILE="${WG_DIR}/publickey"
 
 if [[ ! -f "${WG_PRIV_FILE}" ]]; then
-  # если пользователь ввёл ключ — используем его, иначе генерируем
   if [[ -n "${WG_PRIVATE_KEY:-}" ]]; then
     echo "${WG_PRIVATE_KEY}" > "${WG_PRIV_FILE}"
   else
@@ -218,16 +248,14 @@ if [[ ! -f "${WG_PRIV_FILE}" ]]; then
   fi
   chmod 600 "${WG_PRIV_FILE}"
   wg pubkey < "${WG_PRIV_FILE}" > "${WG_PUB_FILE}"
-  log "Сгенерирована пара ключей WireGuard."
+  log "Ключи WireGuard готовы."
 else
   log "Приватный ключ WireGuard уже существует."
 fi
 
-# сохраняем приватный ключ в конфиг (зашифрованно не будем — уже chmod 600)
 WG_PRIVATE_KEY="$(cat "${WG_PRIV_FILE}")"
 write_env WG_PRIVATE_KEY "${WG_PRIVATE_KEY}"
 
-# базовый конфиг wg0 (без peers — peers добавляются позже скриптом wireguard-add-client)
 WG_CONF="${WG_DIR}/wg0.conf"
 if [[ ! -f "${WG_CONF}" ]]; then
   WG_SERVER_IP="${WG_NETWORK%.*}.1"
@@ -245,7 +273,8 @@ fi
 
 systemctl enable --now wg-quick@wg0 || warn "Не удалось включить wg-quick@wg0 (проверьте конфиг)."
 
-echo "=== Bootstrap completed at $(date -Is) ==="
+echo "=== Bootstrap v2 completed at $(date -Is) ==="
 echo "Конфигурация: ${CONFIG_FILE}"
 echo "Симлинк: ${ENV_LINK}"
 echo "Лог: ${LOG_FILE}"
+
