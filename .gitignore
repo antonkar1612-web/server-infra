@@ -1,3 +1,4 @@
 .env
 secrets/
 *.log
+bootstrap.sh.orig

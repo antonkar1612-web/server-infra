@@ -13,6 +13,9 @@ ENV_LINK="./.env"
 
 exec > >(tee -a "${LOG_FILE}") 2>&1
 echo "=== Bootstrap v5 started at $(date -Is) ==="
+INSTALL_WG="${INSTALL_WG:-yes}"
+. /etc/os-release
+OS_CODENAME="${VERSION_CODENAME:?VERSION_CODENAME не определён в /etc/os-release}"
 
 # ---------- helpers ----------
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
@@ -119,9 +122,11 @@ log "Шаг 1/5: Сбор переменных."
 ask ADMIN_USER "Имя административного пользователя" "anton"
 ask SSH_PORT   "Порт SSH" "22"
 is_number "${SSH_PORT}" || die "SSH_PORT должен быть числом."
-ask WG_PORT    "UDP-порт WireGuard" "51820"
-is_number "${WG_PORT}" || die "WG_PORT должен быть числом."
-ask WG_NETWORK "Подсеть WireGuard (CIDR)" "10.8.0.0/24"
+if [[ "${INSTALL_WG}" == "yes" ]]; then
+  ask WG_PORT    "UDP-порт WireGuard" "51820"
+  is_number "${WG_PORT}" || die "WG_PORT должен быть числом."
+  ask WG_NETWORK "Подсеть WireGuard (CIDR)" "10.8.0.0/24"
+fi
 ask SERVER_IP  "Публичный IP сервера (пусто = автоопределение)" "" "optional"
 
 if [[ -z "${SERVER_IP}" ]]; then
@@ -131,14 +136,18 @@ if [[ -z "${SERVER_IP}" ]]; then
 fi
 
 # WG_PRIVATE_KEY — необязательный: пусто = сгенерировать позже
-ask_secret WG_PRIVATE_KEY "Приватный ключ WireGuard (пусто = сгенерировать)" optional
+if [[ "${INSTALL_WG}" == "yes" ]]; then
+  ask_secret WG_PRIVATE_KEY "Приватный ключ WireGuard (пусто = сгенерировать)" optional
+fi
 
 # ---------- 2. сохранение конфига ----------
 log "Шаг 2/5: Сохранение конфигурации."
 write_env ADMIN_USER "${ADMIN_USER}"
 write_env SSH_PORT   "${SSH_PORT}"
-write_env WG_PORT    "${WG_PORT}"
-write_env WG_NETWORK "${WG_NETWORK}"
+if [[ "${INSTALL_WG}" == "yes" ]]; then
+  write_env WG_PORT    "${WG_PORT}"
+  write_env WG_NETWORK "${WG_NETWORK}"
+fi
 write_env SERVER_IP  "${SERVER_IP}"
 
 if [[ -L "${ENV_LINK}" || -f "${ENV_LINK}" ]]; then
@@ -160,9 +169,15 @@ command -v ufw >/dev/null 2>&1 || apt-get install -y ufw
 ufw --force default deny incoming
 ufw --force default allow outgoing
 ufw allow "${SSH_PORT}/tcp" comment 'SSH'
-ufw allow "${WG_PORT}/udp" comment 'WireGuard'
+if [[ "${INSTALL_WG}" == "yes" ]]; then
+  ufw allow "${WG_PORT}/udp" comment 'WireGuard'
+fi
 ufw --force enable
-log "UFW: deny incoming, allow ${SSH_PORT}/tcp и ${WG_PORT}/udp."
+if [[ "${INSTALL_WG}" == "yes" ]]; then
+  log "UFW: deny incoming, allow ${SSH_PORT}/tcp и ${WG_PORT}/udp."
+else
+  log "UFW: deny incoming, allow ${SSH_PORT}/tcp."
+fi
 
 # fail2ban
 dpkg -s fail2ban >/dev/null 2>&1 || apt-get install -y fail2ban
@@ -229,6 +244,7 @@ else
   log "Docker установлен."
 fi
 
+if [[ "${INSTALL_WG}" == "yes" ]]; then
 # ---------- 5. WireGuard ----------
 log "Шаг 5/5: Установка и настройка WireGuard."
 dpkg -s wireguard >/dev/null 2>&1 || apt-get install -y wireguard
@@ -272,6 +288,9 @@ else
 fi
 
 systemctl enable --now wg-quick@wg0 || warn "Не удалось включить wg-quick@wg0 (проверьте конфиг)."
+else
+  log "Шаг 5/5: WireGuard пропущен (INSTALL_WG=no)."
+fi
 
 echo "=== Bootstrap v5 completed at $(date -Is) ==="
 echo "Конфигурация: ${CONFIG_FILE}"
